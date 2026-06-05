@@ -1,0 +1,29 @@
+# Build artifacts
+bin/*
+!bin/.gitkeep
+*.o
+*.out
+
+# Runtime outputs
+data.txt
+data_ipcc.txt
+output.png
+
+# Large files (decompressed from .gz)
+check.txt
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IPCC_stencil submodule artifacts
+IPCC_stencil/bin/*
+IPCC_stencil/data.txt
+IPCC_stencil/output.png
