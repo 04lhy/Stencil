@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <sys/mman.h>
 
 template<typename P>
 ImageClass<P>::ImageClass(int const _width, int const _height)
@@ -9,6 +10,8 @@ ImageClass<P>::ImageClass(int const _width, int const _height)
 
   // Initialize a blank image
   pixel = (P*)malloc(sizeof(P)*width*height);
+  // Hint to use transparent huge pages (2MB pages reduce TLB miss)
+  madvise(pixel, sizeof(P)*width*height, MADV_HUGEPAGE);
 
   for (int j = 0; j < width; j++)
     for (int i = 0; i < height; i++)
@@ -63,6 +66,8 @@ ImageClass<P>::ImageClass(char const * file_name) {
 
   // Convert from png_bytep to P
   pixel = (P*)malloc(sizeof(P)*width*height);
+  // Hint to use transparent huge pages (2MB pages reduce TLB miss)
+  madvise(pixel, sizeof(P)*width*height, MADV_HUGEPAGE);
 
   for(int j = 0; j < width; j++)
      for(int i = 0; i < height; i++)
