@@ -9,13 +9,14 @@
 
 ## 📊 性能概览
 
-| 平台 | CPU | 最优时间 (10 次) | 加速比 | 实现 |
-|------|-----|-----------------|--------|------|
-| **本仓库** | Core Ultra 9 275HX (24C) | **62.5 ms** | **136.5x** | AVX2 + Stream + OpenMP |
-| 原始 IPCC | AMD EPYC 7452×2 (64C) | 15.8 ms | 695.5x | AVX2 + Stream + NUMA |
-| 基线 (O0) | Core Ultra 9 275HX | 8529.8 ms | 1.0x | 串行标量 |
+| 平台 | CPU | 系统 | 最优时间 (10 次) | 加速比 | 实现 |
+|------|-----|------|-----------------|--------|------|
+| **平台 A** | Core Ultra 9 275HX (24C) | WSL2 | **62.5 ms** | **136.5x** | AVX2 + Stream + OpenMP |
+| **平台 B** | Core i9-13900H (6P+8E) | 原生 Linux | **86.9 ms** | — | IPCC 分组加法 + Stream + P-core 12T |
+| 原始 IPCC | AMD EPYC 7452×2 (64C) | 原生 Linux | 15.8 ms | 695.5x | AVX2 + Stream + NUMA |
+| 基线 (O0) | Core Ultra 9 275HX | WSL2 | 8529.8 ms | 1.0x | 串行标量 |
 
-> 在相同硬件 (Arrow Lake, 24 核, WSL2) 上，IPCC 参考代码与本地优化版几乎持平，差距 < 7%。
+> 平台 A (Arrow Lake WSL2) 上 IPCC 参考代码与本地优化版几乎持平，差距 < 7%。平台 B (Raptor Lake 原生 Linux) 上实现了 P-core 精确绑定、多图像交叉验证等额外优化。
 
 ## 📁 目录结构
 
@@ -31,7 +32,7 @@ Stencil/
 │   ├── Makefile                 #   多目标编译 (avx2/block/simple/debug)
 │   ├── src/                     #   源代码
 │   │   ├── main.cc              #     主程序入口 (计时部分不可修改)
-│   │   ├── stencil.cc           #     ★ 默认优化: 2x unroll + stream + prefetch
+│   │   ├── stencil.cc           #     ★ 默认优化: IPCC 分组加法 + stream + prefetch
 │   │   ├── stencil_avx2.cc      #     AVX2 逐行 kernel
 │   │   ├── stencil_block.cc     #     分块 kernel (读 6 行算 4 行)
 │   │   ├── stencil_simple.cc    #     1D 线性化 (对标 IPCC opt_kernel)
@@ -70,21 +71,27 @@ Stencil/
 ```bash
 # 编译优化版 stencil 项目
 cd stencil
-make all          # 编译默认优化版 (2x unroll + stream + prefetch)
+make all          # 编译默认优化版 (IPCC 分组加法 + stream + prefetch)
 make avx2         # 编译逐行 AVX2 kernel 版本
 make block        # 编译分块 kernel 版本
+make simple       # 编译 stencil_simple (1D 线性化)
+make debug        # 编译调试版 (O0)
 
 # 运行 (自动使用最优线程配置)
-make run          # 20 线程, spread 绑定
+make run          # 16 线程, spread 绑定 (全核心)
+make run-pcore    # P-core 12 线程, close 绑定 (平台 B 最优)
 
 # 验证正确性
 make check        # 对比 data.txt 与 check.txt
+make check-all    # 验证所有版本
+make validate-multi  # 多图像交叉验证 (5 张不同尺寸图像)
 
 # 性能对比
 make bench-all    # 运行所有版本并对比 Total 时间
 
 # 线程数扫描
-make scan-threads # 测试 4/8/12/16/20/24 线程性能
+make scan-threads # 测试 4/8/12/16/20 线程性能
+make scan-pcore   # P-core 绑定扫描
 ```
 
 ```bash
@@ -111,8 +118,8 @@ make bench-all
 | OpenMP 多线程 (20T) | ~10.7× | `#pragma omp parallel for` |
 | AVX2 手动向量化 (8 floats) | ~5.8× | `_mm256_loadu/add/fmsub/max/min` |
 | Stream Store (非临时写入) | ~2.1× | `_mm256_stream_ps` |
-| 2× 循环展开 + Prefetch | ~1.1× | 手动展开 + `_mm_prefetch` |
-| 分组加法 (ILP 优化) | ~1.07× | IPCC opt_kernel.h 分组策略 |
+| IPCC 分组加法 (ILP 优化) | ~1.07× | 4 独立加法子树, 依赖链 ~5 级 |
+| P-core 精确绑定 | ~1.05× (平台 B) | `taskset -c 0-11` + `OMP_PROC_BIND=close` |
 
 **最终**: `1.5 × 10.7 × 5.8 × 2.1 × 1.1 ≈ 127×` (实测 127.2×，理论 215×，差距来自内存带宽饱和)
 
@@ -122,17 +129,20 @@ make bench-all
 
 | 维度 | IPCC opt_kernel | 本项目 stencil.cc |
 |------|----------------|-------------------|
-| **加法依赖链** | ~5 级 (分组独立子树) | ~11 级 (顺序累加) |
-| **对齐处理** | 1 次前置对齐 | 每行对齐检测 (5905 次) |
-| **寄存器压力** | ~8 YMM | ~14 YMM |
-| **循环展开** | 无 | 2× (每迭代 16 元素) |
-| **软件预取** | 无 | _mm_prefetch T0 |
+| **加法依赖链** | ~5 级 (分组独立子树) | ~5 级 (IPCC 分组加法, 已集成) |
+| **索引方式** | 1D 线性化 | 逐行指针 (r0/r1/r2) |
+| **对齐处理** | 1 次前置对齐 | 每行对齐检测 |
+| **软件预取** | 无 | `_mm_prefetch` T0 |
+| **OpenMP 调度** | 手动分段 | `#pragma omp parallel for` |
 | **正确性** | ✅ | ✅ |
-| **性能 (同硬件)** | **62.5 ms** | 67.1 ms |
+| **性能 (平台 A)** | **62.5 ms** | 67.1 ms |
+| **性能 (平台 B)** | — | **88.9 ms** (P-core 12T) |
 
-**结论**: IPCC 的**分组加法策略**将 9 个邻域像素分入 4 个独立加法子树再合并，依赖链深度从 11 级降至 5 级，更好地利用了 Arrow Lake 的宽发射 ILP 能力。详见 [优化记录 §6.6](stencil/优化记录.md#66-ipcc-参考实现-vs-本项目实现对比)。
+**结论**: 已集成 IPCC 的**分组加法策略**，将 9 个邻域像素分入 4 个独立加法子树再合并，依赖链深度从 11 级降至 5 级。平台 A 上差距 < 7%，平台 B 上额外实现了 P-core 精确绑定。详见 [优化记录 §6.6](stencil/优化记录.md#66-ipcc-参考实现-vs-本项目实现对比)。
 
 ## 📊 性能演进
+
+### 平台 A (Arrow Lake, WSL2)
 
 | 阶段 | 总时间 (10 次) | 加速比 | 技术 |
 |------|---------------|--------|------|
@@ -143,6 +153,16 @@ make bench-all
 | 4-Stream | ~67 ms | ~127× | 非临时写入 |
 | 5-2× Unroll | 67.1 ms | 127.2× | 循环展开 + 预取 |
 | **IPCC ref** | **62.5 ms** | **136.5×** | 分组加法 ILP |
+
+### 平台 B (Raptor Lake, 原生 Linux)
+
+| 阶段 | 总时间 (10 次) | 加速比 | 技术 |
+|------|---------------|--------|------|
+| 0-debug (O0 4T) | 349.6 ms | 1.0× | O0, AVX2 intrinsics, 4T |
+| 1-Ofast+OMP | ~160 ms | ~2.2× | -Ofast, 4T |
+| 2-OMP 16T | 93.4 ms | 3.7× | OpenMP 16T spread |
+| 3-分组加法 | 91.9 ms | 3.8× | IPCC 分组加法策略 |
+| **4-P-core 绑定** | **88.9 ms** | **3.9×** | P-core 12T close + 分组加法 |
 
 ## 📖 文档导航
 
@@ -156,10 +176,10 @@ make bench-all
 
 ## 🛠️ 已知限制
 
-- **AVX-512**: Core Ultra 9 275HX (Arrow Lake) 不支持 AVX-512 指令集
-- **P-core 绑定**: WSL2 不暴露 hybrid CPU 拓扑，无法区分 P-core / E-core
-- **大页内存**: 需 root 权限配置，WSL2 支持不完整
-- **编译器**: 当前用 GCC 9.4.0，Intel oneAPI (ICX) 可能生成更优代码
+- **AVX-512**: 两个平台 (Arrow Lake / Raptor Lake) 均不支持 AVX-512 指令集
+- **P-core 绑定**: ✅ 平台 B (原生 Linux) 已实现；平台 A (WSL2) 不暴露 hybrid 拓扑
+- **大页内存**: madvise 已添加但 THP 未触发；显式 HugeTLB 需 root 权限
+- **编译器**: 当前用 GCC 9.4.0 (A) / GCC 11.4.0 (B)，Intel oneAPI (ICX) 可能生成更优代码
 
 ## 📄 License
 
@@ -168,4 +188,4 @@ MIT License — 详见各子目录。
 ---
 
 *本仓库为 [IPCC 2020 初赛题目](https://github.com/04lhy/Stencil) 的完整实现与优化。*
-*性能数据基于 Intel Core Ultra 9 275HX (Arrow Lake), 24C/24T, WSL2, GCC 9.4.0。*
+*性能数据基于平台 A (Core Ultra 9 275HX, Arrow Lake, WSL2) 和平台 B (Core i9-13900H, Raptor Lake, 原生 Linux)。*
